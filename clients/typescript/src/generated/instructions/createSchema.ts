@@ -12,8 +12,6 @@ import {
   combineCodec,
   getArrayDecoder,
   getArrayEncoder,
-  getBytesDecoder,
-  getBytesEncoder,
   getStructDecoder,
   getStructEncoder,
   getU32Decoder,
@@ -22,6 +20,8 @@ import {
   getU8Encoder,
   getUtf8Decoder,
   getUtf8Encoder,
+  SOLANA_ERROR__PROGRAM_CLIENTS__INSUFFICIENT_ACCOUNT_METAS,
+  SolanaError,
   transformEncoder,
   type AccountMeta,
   type AccountSignerMeta,
@@ -39,12 +39,24 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from '@solana/kit';
+import {
+  getAccountMetaFactory,
+  getAddressFromResolvedInstructionAccount,
+  getNonNullResolvedInstructionInput,
+  type ResolvedInstructionAccount,
+} from '@solana/kit/program-client-core';
+import { findSchemaPda } from '../pdas';
 import { SOLANA_ATTESTATION_SERVICE_PROGRAM_ADDRESS } from '../programs';
-import { getAccountMetaFactory, type ResolvedAccount } from '../shared';
+import {
+  getSchemaDataTypeDecoder,
+  getSchemaDataTypeEncoder,
+  type SchemaDataType,
+  type SchemaDataTypeArgs,
+} from '../types';
 
 export const CREATE_SCHEMA_DISCRIMINATOR = 1;
 
-export function getCreateSchemaDiscriminatorBytes() {
+export function getCreateSchemaDiscriminatorBytes(): ReadonlyUint8Array {
   return getU8Encoder().encode(CREATE_SCHEMA_DISCRIMINATOR);
 }
 
@@ -54,9 +66,8 @@ export type CreateSchemaInstruction<
   TAccountAuthority extends string | AccountMeta<string> = string,
   TAccountCredential extends string | AccountMeta<string> = string,
   TAccountSchema extends string | AccountMeta<string> = string,
-  TAccountSystemProgram extends
-    | string
-    | AccountMeta<string> = '11111111111111111111111111111111',
+  TAccountSystemProgram extends string | AccountMeta<string> =
+    '11111111111111111111111111111111',
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -87,14 +98,14 @@ export type CreateSchemaInstructionData = {
   discriminator: number;
   name: string;
   description: string;
-  layout: ReadonlyUint8Array;
+  layout: Array<SchemaDataType>;
   fieldNames: Array<string>;
 };
 
 export type CreateSchemaInstructionDataArgs = {
   name: string;
   description: string;
-  layout: ReadonlyUint8Array;
+  layout: Array<SchemaDataTypeArgs>;
   fieldNames: Array<string>;
 };
 
@@ -104,7 +115,7 @@ export function getCreateSchemaInstructionDataEncoder(): Encoder<CreateSchemaIns
       ['discriminator', getU8Encoder()],
       ['name', addEncoderSizePrefix(getUtf8Encoder(), getU32Encoder())],
       ['description', addEncoderSizePrefix(getUtf8Encoder(), getU32Encoder())],
-      ['layout', addEncoderSizePrefix(getBytesEncoder(), getU32Encoder())],
+      ['layout', getArrayEncoder(getSchemaDataTypeEncoder())],
       [
         'fieldNames',
         getArrayEncoder(
@@ -121,7 +132,7 @@ export function getCreateSchemaInstructionDataDecoder(): Decoder<CreateSchemaIns
     ['discriminator', getU8Decoder()],
     ['name', addDecoderSizePrefix(getUtf8Decoder(), getU32Decoder())],
     ['description', addDecoderSizePrefix(getUtf8Decoder(), getU32Decoder())],
-    ['layout', addDecoderSizePrefix(getBytesDecoder(), getU32Decoder())],
+    ['layout', getArrayDecoder(getSchemaDataTypeDecoder())],
     [
       'fieldNames',
       getArrayDecoder(addDecoderSizePrefix(getUtf8Decoder(), getU32Decoder())),
@@ -137,6 +148,111 @@ export function getCreateSchemaInstructionDataCodec(): Codec<
     getCreateSchemaInstructionDataEncoder(),
     getCreateSchemaInstructionDataDecoder()
   );
+}
+
+export type CreateSchemaAsyncInput<
+  TAccountPayer extends string = string,
+  TAccountAuthority extends string = string,
+  TAccountCredential extends string = string,
+  TAccountSchema extends string = string,
+  TAccountSystemProgram extends string = string,
+> = {
+  payer: TransactionSigner<TAccountPayer>;
+  authority: TransactionSigner<TAccountAuthority>;
+  /** Credential the Schema is associated with */
+  credential: Address<TAccountCredential>;
+  schema?: Address<TAccountSchema>;
+  systemProgram?: Address<TAccountSystemProgram>;
+  name: CreateSchemaInstructionDataArgs['name'];
+  description: CreateSchemaInstructionDataArgs['description'];
+  layout: CreateSchemaInstructionDataArgs['layout'];
+  fieldNames: CreateSchemaInstructionDataArgs['fieldNames'];
+};
+
+export async function getCreateSchemaInstructionAsync<
+  TAccountPayer extends string,
+  TAccountAuthority extends string,
+  TAccountCredential extends string,
+  TAccountSchema extends string,
+  TAccountSystemProgram extends string,
+  TProgramAddress extends Address =
+    typeof SOLANA_ATTESTATION_SERVICE_PROGRAM_ADDRESS,
+>(
+  input: CreateSchemaAsyncInput<
+    TAccountPayer,
+    TAccountAuthority,
+    TAccountCredential,
+    TAccountSchema,
+    TAccountSystemProgram
+  >,
+  config?: { programAddress?: TProgramAddress }
+): Promise<
+  CreateSchemaInstruction<
+    TProgramAddress,
+    TAccountPayer,
+    TAccountAuthority,
+    TAccountCredential,
+    TAccountSchema,
+    TAccountSystemProgram
+  >
+> {
+  // Program address.
+  const programAddress =
+    config?.programAddress ?? SOLANA_ATTESTATION_SERVICE_PROGRAM_ADDRESS;
+
+  // Original accounts.
+  const originalAccounts = {
+    payer: { value: input.payer ?? null, isWritable: true },
+    authority: { value: input.authority ?? null, isWritable: false },
+    credential: { value: input.credential ?? null, isWritable: false },
+    schema: { value: input.schema ?? null, isWritable: true },
+    systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+  };
+  const accounts = originalAccounts as Record<
+    keyof typeof originalAccounts,
+    ResolvedInstructionAccount
+  >;
+
+  // Original args.
+  const args = { ...input };
+
+  // Resolve default values.
+  if (!accounts.schema.value) {
+    accounts.schema.value = await findSchemaPda({
+      credential: getAddressFromResolvedInstructionAccount(
+        'credential',
+        accounts.credential.value
+      ),
+      name: getNonNullResolvedInstructionInput('name', args.name),
+      version: 1,
+    });
+  }
+  if (!accounts.systemProgram.value) {
+    accounts.systemProgram.value =
+      '11111111111111111111111111111111' as Address<'11111111111111111111111111111111'>;
+  }
+
+  const getAccountMeta = getAccountMetaFactory(programAddress, 'programId');
+  return Object.freeze({
+    accounts: [
+      getAccountMeta('payer', accounts.payer),
+      getAccountMeta('authority', accounts.authority),
+      getAccountMeta('credential', accounts.credential),
+      getAccountMeta('schema', accounts.schema),
+      getAccountMeta('systemProgram', accounts.systemProgram),
+    ],
+    data: getCreateSchemaInstructionDataEncoder().encode(
+      args as CreateSchemaInstructionDataArgs
+    ),
+    programAddress,
+  } as CreateSchemaInstruction<
+    TProgramAddress,
+    TAccountPayer,
+    TAccountAuthority,
+    TAccountCredential,
+    TAccountSchema,
+    TAccountSystemProgram
+  >);
 }
 
 export type CreateSchemaInput<
@@ -164,8 +280,8 @@ export function getCreateSchemaInstruction<
   TAccountCredential extends string,
   TAccountSchema extends string,
   TAccountSystemProgram extends string,
-  TProgramAddress extends
-    Address = typeof SOLANA_ATTESTATION_SERVICE_PROGRAM_ADDRESS,
+  TProgramAddress extends Address =
+    typeof SOLANA_ATTESTATION_SERVICE_PROGRAM_ADDRESS,
 >(
   input: CreateSchemaInput<
     TAccountPayer,
@@ -197,7 +313,7 @@ export function getCreateSchemaInstruction<
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
-    ResolvedAccount
+    ResolvedInstructionAccount
   >;
 
   // Original args.
@@ -212,11 +328,11 @@ export function getCreateSchemaInstruction<
   const getAccountMeta = getAccountMetaFactory(programAddress, 'programId');
   return Object.freeze({
     accounts: [
-      getAccountMeta(accounts.payer),
-      getAccountMeta(accounts.authority),
-      getAccountMeta(accounts.credential),
-      getAccountMeta(accounts.schema),
-      getAccountMeta(accounts.systemProgram),
+      getAccountMeta('payer', accounts.payer),
+      getAccountMeta('authority', accounts.authority),
+      getAccountMeta('credential', accounts.credential),
+      getAccountMeta('schema', accounts.schema),
+      getAccountMeta('systemProgram', accounts.systemProgram),
     ],
     data: getCreateSchemaInstructionDataEncoder().encode(
       args as CreateSchemaInstructionDataArgs
@@ -257,8 +373,13 @@ export function parseCreateSchemaInstruction<
     InstructionWithData<ReadonlyUint8Array>
 ): ParsedCreateSchemaInstruction<TProgram, TAccountMetas> {
   if (instruction.accounts.length < 5) {
-    // TODO: Coded error.
-    throw new Error('Not enough accounts');
+    throw new SolanaError(
+      SOLANA_ERROR__PROGRAM_CLIENTS__INSUFFICIENT_ACCOUNT_METAS,
+      {
+        actualAccountMetas: instruction.accounts.length,
+        expectedAccountMetas: 5,
+      }
+    );
   }
   let accountIndex = 0;
   const getNextAccount = () => {

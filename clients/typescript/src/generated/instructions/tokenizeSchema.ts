@@ -14,6 +14,8 @@ import {
   getU64Encoder,
   getU8Decoder,
   getU8Encoder,
+  SOLANA_ERROR__PROGRAM_CLIENTS__INSUFFICIENT_ACCOUNT_METAS,
+  SolanaError,
   transformEncoder,
   type AccountMeta,
   type AccountSignerMeta,
@@ -31,12 +33,17 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from '@solana/kit';
+import {
+  getAccountMetaFactory,
+  getAddressFromResolvedInstructionAccount,
+  type ResolvedInstructionAccount,
+} from '@solana/kit/program-client-core';
+import { findSasAuthorityPda, findSchemaMintPda } from '../pdas';
 import { SOLANA_ATTESTATION_SERVICE_PROGRAM_ADDRESS } from '../programs';
-import { getAccountMetaFactory, type ResolvedAccount } from '../shared';
 
 export const TOKENIZE_SCHEMA_DISCRIMINATOR = 9;
 
-export function getTokenizeSchemaDiscriminatorBytes() {
+export function getTokenizeSchemaDiscriminatorBytes(): ReadonlyUint8Array {
   return getU8Encoder().encode(TOKENIZE_SCHEMA_DISCRIMINATOR);
 }
 
@@ -48,12 +55,10 @@ export type TokenizeSchemaInstruction<
   TAccountSchema extends string | AccountMeta<string> = string,
   TAccountMint extends string | AccountMeta<string> = string,
   TAccountSasPda extends string | AccountMeta<string> = string,
-  TAccountSystemProgram extends
-    | string
-    | AccountMeta<string> = '11111111111111111111111111111111',
-  TAccountTokenProgram extends
-    | string
-    | AccountMeta<string> = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
+  TAccountSystemProgram extends string | AccountMeta<string> =
+    '11111111111111111111111111111111',
+  TAccountTokenProgram extends string | AccountMeta<string> =
+    'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -123,6 +128,139 @@ export function getTokenizeSchemaInstructionDataCodec(): FixedSizeCodec<
   );
 }
 
+export type TokenizeSchemaAsyncInput<
+  TAccountPayer extends string = string,
+  TAccountAuthority extends string = string,
+  TAccountCredential extends string = string,
+  TAccountSchema extends string = string,
+  TAccountMint extends string = string,
+  TAccountSasPda extends string = string,
+  TAccountSystemProgram extends string = string,
+  TAccountTokenProgram extends string = string,
+> = {
+  payer: TransactionSigner<TAccountPayer>;
+  authority: TransactionSigner<TAccountAuthority>;
+  /** Credential the Schema is associated with */
+  credential: Address<TAccountCredential>;
+  schema: Address<TAccountSchema>;
+  /** Mint of Schema Token */
+  mint?: Address<TAccountMint>;
+  /** Program derived address used as program signer authority */
+  sasPda?: Address<TAccountSasPda>;
+  systemProgram?: Address<TAccountSystemProgram>;
+  tokenProgram?: Address<TAccountTokenProgram>;
+  maxSize: TokenizeSchemaInstructionDataArgs['maxSize'];
+};
+
+export async function getTokenizeSchemaInstructionAsync<
+  TAccountPayer extends string,
+  TAccountAuthority extends string,
+  TAccountCredential extends string,
+  TAccountSchema extends string,
+  TAccountMint extends string,
+  TAccountSasPda extends string,
+  TAccountSystemProgram extends string,
+  TAccountTokenProgram extends string,
+  TProgramAddress extends Address =
+    typeof SOLANA_ATTESTATION_SERVICE_PROGRAM_ADDRESS,
+>(
+  input: TokenizeSchemaAsyncInput<
+    TAccountPayer,
+    TAccountAuthority,
+    TAccountCredential,
+    TAccountSchema,
+    TAccountMint,
+    TAccountSasPda,
+    TAccountSystemProgram,
+    TAccountTokenProgram
+  >,
+  config?: { programAddress?: TProgramAddress }
+): Promise<
+  TokenizeSchemaInstruction<
+    TProgramAddress,
+    TAccountPayer,
+    TAccountAuthority,
+    TAccountCredential,
+    TAccountSchema,
+    TAccountMint,
+    TAccountSasPda,
+    TAccountSystemProgram,
+    TAccountTokenProgram
+  >
+> {
+  // Program address.
+  const programAddress =
+    config?.programAddress ?? SOLANA_ATTESTATION_SERVICE_PROGRAM_ADDRESS;
+
+  // Original accounts.
+  const originalAccounts = {
+    payer: { value: input.payer ?? null, isWritable: true },
+    authority: { value: input.authority ?? null, isWritable: false },
+    credential: { value: input.credential ?? null, isWritable: false },
+    schema: { value: input.schema ?? null, isWritable: false },
+    mint: { value: input.mint ?? null, isWritable: true },
+    sasPda: { value: input.sasPda ?? null, isWritable: false },
+    systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
+  };
+  const accounts = originalAccounts as Record<
+    keyof typeof originalAccounts,
+    ResolvedInstructionAccount
+  >;
+
+  // Original args.
+  const args = { ...input };
+
+  // Resolve default values.
+  if (!accounts.mint.value) {
+    accounts.mint.value = await findSchemaMintPda({
+      schema: getAddressFromResolvedInstructionAccount(
+        'schema',
+        accounts.schema.value
+      ),
+    });
+  }
+  if (!accounts.sasPda.value) {
+    accounts.sasPda.value = await findSasAuthorityPda();
+  }
+  if (!accounts.systemProgram.value) {
+    accounts.systemProgram.value =
+      '11111111111111111111111111111111' as Address<'11111111111111111111111111111111'>;
+  }
+  if (!accounts.tokenProgram.value) {
+    accounts.tokenProgram.value =
+      'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb' as Address<'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'>;
+  }
+
+  const getAccountMeta = getAccountMetaFactory(programAddress, 'programId');
+  return Object.freeze({
+    accounts: [
+      getAccountMeta('payer', accounts.payer),
+      getAccountMeta('authority', accounts.authority),
+      getAccountMeta('credential', accounts.credential),
+      getAccountMeta('schema', accounts.schema),
+      getAccountMeta('mint', accounts.mint),
+      getAccountMeta('sasPda', accounts.sasPda),
+      getAccountMeta('systemProgram', accounts.systemProgram),
+      getAccountMeta('tokenProgram', accounts.tokenProgram),
+    ],
+    data: getTokenizeSchemaInstructionDataEncoder().encode(
+      args as TokenizeSchemaInstructionDataArgs
+    ),
+    programAddress,
+  } as TokenizeSchemaInstruction<
+    TProgramAddress,
+    TAccountPayer,
+    TAccountAuthority,
+    TAccountCredential,
+    TAccountSchema,
+    TAccountMint,
+    TAccountSasPda,
+    TAccountSystemProgram,
+    TAccountTokenProgram
+  >);
+}
+
 export type TokenizeSchemaInput<
   TAccountPayer extends string = string,
   TAccountAuthority extends string = string,
@@ -156,8 +294,8 @@ export function getTokenizeSchemaInstruction<
   TAccountSasPda extends string,
   TAccountSystemProgram extends string,
   TAccountTokenProgram extends string,
-  TProgramAddress extends
-    Address = typeof SOLANA_ATTESTATION_SERVICE_PROGRAM_ADDRESS,
+  TProgramAddress extends Address =
+    typeof SOLANA_ATTESTATION_SERVICE_PROGRAM_ADDRESS,
 >(
   input: TokenizeSchemaInput<
     TAccountPayer,
@@ -198,7 +336,7 @@ export function getTokenizeSchemaInstruction<
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
-    ResolvedAccount
+    ResolvedInstructionAccount
   >;
 
   // Original args.
@@ -217,14 +355,14 @@ export function getTokenizeSchemaInstruction<
   const getAccountMeta = getAccountMetaFactory(programAddress, 'programId');
   return Object.freeze({
     accounts: [
-      getAccountMeta(accounts.payer),
-      getAccountMeta(accounts.authority),
-      getAccountMeta(accounts.credential),
-      getAccountMeta(accounts.schema),
-      getAccountMeta(accounts.mint),
-      getAccountMeta(accounts.sasPda),
-      getAccountMeta(accounts.systemProgram),
-      getAccountMeta(accounts.tokenProgram),
+      getAccountMeta('payer', accounts.payer),
+      getAccountMeta('authority', accounts.authority),
+      getAccountMeta('credential', accounts.credential),
+      getAccountMeta('schema', accounts.schema),
+      getAccountMeta('mint', accounts.mint),
+      getAccountMeta('sasPda', accounts.sasPda),
+      getAccountMeta('systemProgram', accounts.systemProgram),
+      getAccountMeta('tokenProgram', accounts.tokenProgram),
     ],
     data: getTokenizeSchemaInstructionDataEncoder().encode(
       args as TokenizeSchemaInstructionDataArgs
@@ -273,8 +411,13 @@ export function parseTokenizeSchemaInstruction<
     InstructionWithData<ReadonlyUint8Array>
 ): ParsedTokenizeSchemaInstruction<TProgram, TAccountMetas> {
   if (instruction.accounts.length < 8) {
-    // TODO: Coded error.
-    throw new Error('Not enough accounts');
+    throw new SolanaError(
+      SOLANA_ERROR__PROGRAM_CLIENTS__INSUFFICIENT_ACCOUNT_METAS,
+      {
+        actualAccountMetas: instruction.accounts.length,
+        expectedAccountMetas: 8,
+      }
+    );
   }
   let accountIndex = 0;
   const getNextAccount = () => {
